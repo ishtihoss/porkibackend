@@ -1,0 +1,27 @@
+{
+  "name": "porkihp-backend",
+  "version": "2.0.0",
+  "description": "Backend API for PorkiCoder",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "production": "NODE_ENV=production node src/index.js"
+  },
+  "keywords": ["stripe", "supabase", "saas", "api"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "stripe": "^14.10.0",
+    "@supabase/supabase-js": "^2.39.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
