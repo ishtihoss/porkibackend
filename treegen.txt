@@ -1,10 +1,13 @@
 .
 |-- Dockerfile
-|-- StripeService.js
 |-- entrypoint.sh
-|-- index.js
 |-- nginx.backend.conf
+|-- package-lock.json
 |-- package.json
+|-- src
+|   |-- index.js
+|   `-- services
+|       `-- StripeService.js
 `-- treegen.txt
 
-1 directory, 7 files
+3 directories, 8 files

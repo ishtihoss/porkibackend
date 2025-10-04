@@ -1,4 +1,3 @@
-// Copy your existing StripeService.js exactly as is
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
 
