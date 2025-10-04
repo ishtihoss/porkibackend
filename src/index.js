@@ -5,6 +5,25 @@ const StripeService = require('./services/StripeService');
 
 dotenv.config();
 
+// Validate required environment variables
+const requiredEnvVars = [
+    'STRIPE_SECRET_KEY',
+    'STRIPE_WEBHOOK_SECRET',
+    'STRIPE_PRICE_ID',
+    'SUPABASE_URL',
+    'SUPABASE_SERVICE_ROLE_KEY',
+    'FRONTEND_URL'
+];
+
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+if (missingEnvVars.length > 0) {
+    console.error('❌ Missing required environment variables:');
+    missingEnvVars.forEach(varName => console.error(`   - ${varName}`));
+    console.error('\n💡 Please check your .env file');
+    process.exit(1);
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -182,9 +201,26 @@ app.use((err, req, res, next) => {
 });
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Backend server running on port ${PORT}`);
     console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🔒 CORS allowed origins:`, allowedOrigins);
     console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('👋 SIGTERM signal received: closing HTTP server');
+    server.close(() => {
+        console.log('✅ HTTP server closed');
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('\n👋 SIGINT signal received: closing HTTP server');
+    server.close(() => {
+        console.log('✅ HTTP server closed');
+        process.exit(0);
+    });
 });
