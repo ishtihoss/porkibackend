@@ -15,8 +15,12 @@ COPY src/ ./src/
 # Copy Nginx configuration
 COPY nginx.backend.conf /etc/nginx/http.d/default.conf
 
-# Create directory for Let's Encrypt challenges
-RUN mkdir -p /var/www/certbot
+# Create directory for Let's Encrypt challenges (will be overridden by volume mount)
+RUN mkdir -p /var/www/certbot/.well-known/acme-challenge
+
+# Create nginx user and set permissions
+RUN adduser -D -g 'nginx' nginx || true
+RUN chown -R nginx:nginx /var/www
 
 # Copy and make the entrypoint script executable
 COPY entrypoint.sh .
