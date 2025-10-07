@@ -36,7 +36,7 @@ const allowedOrigins = [
     ...(process.env.ALLOWED_ORIGINS?.split(',') || [])
 ];
 
-app.use(cors({
+const corsOptions = {
     origin: function (origin, callback) {
         // Allow requests with no origin (Electron, mobile apps, curl)
         if (!origin) {
@@ -58,22 +58,37 @@ app.use(cors({
         callback(new Error('Not allowed by CORS'));
     },
     credentials: true
-}));
+};
 
-// Webhook endpoint (raw body needed)
+// ⚠️ CRITICAL: Webhook endpoint MUST be defined BEFORE any body parsers or CORS
+// Stripe webhooks need raw body for signature verification and don't send CORS headers
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
     const sig = req.headers['stripe-signature'];
     
+    console.log('🔔 Stripe webhook received');
+    console.log('  IP:', req.ip || req.connection.remoteAddress);
+    console.log('  Has signature:', !!sig);
+    console.log('  Body size:', req.body?.length || 0);
+    
+    if (!sig) {
+        console.error('❌ Missing stripe-signature header');
+        return res.status(400).send('Missing stripe-signature header');
+    }
+    
     try {
         await stripeService.handleWebhook(req.body, sig);
+        console.log('✅ Webhook processed successfully');
         res.json({ received: true });
     } catch (err) {
-        console.error('Webhook error:', err.message);
+        console.error('❌ Webhook error:', err.message);
         res.status(400).send(`Webhook Error: ${err.message}`);
     }
 });
 
-// Regular middleware
+// Apply CORS to all other routes
+app.use(cors(corsOptions));
+
+// Regular middleware (after webhook route)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -206,6 +221,8 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🔒 CORS allowed origins:`, allowedOrigins);
     console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL}`);
+    console.log(`🔔 Stripe webhook endpoint: /webhook/stripe`);
+    console.log(`🔐 Webhook secret configured: ${!!process.env.STRIPE_WEBHOOK_SECRET}`);
 });
 
 // Graceful shutdown
