@@ -97,6 +97,8 @@ class StripeService {
                 await this.handleSubscriptionDeleted(event.data.object);
                 break;
 
+            // Handle both payment success events (invoice.paid is newer, invoice.payment_succeeded is legacy)
+            case 'invoice.paid':
             case 'invoice.payment_succeeded':
                 await this.handleInvoicePaymentSucceeded(event.data.object);
                 break;
@@ -134,7 +136,7 @@ class StripeService {
             throw error;
         }
 
-        console.log(`Updated user ${userId} with customer ID ${customerId}`);
+        console.log(`✅ Checkout completed - User ${userId} with customer ID ${customerId}`);
     }
 
     async handleSubscriptionUpdate(subscription) {
@@ -151,7 +153,7 @@ class StripeService {
                 p_end_date: currentPeriodEnd.toISOString()
             });
 
-            console.log(`Updated subscription ${subscriptionId} status to ${status}`);
+            console.log(`✅ Subscription ${subscriptionId} updated - Status: ${status}`);
         } catch (error) {
             console.error('Error updating subscription:', error);
             throw error;
@@ -170,7 +172,7 @@ class StripeService {
                 p_end_date: new Date().toISOString()
             });
 
-            console.log(`Marked subscription ${subscriptionId} as canceled`);
+            console.log(`🚫 Subscription ${subscriptionId} canceled for customer ${customerId}`);
         } catch (error) {
             console.error('Error handling subscription deletion:', error);
             throw error;
@@ -178,11 +180,39 @@ class StripeService {
     }
 
     async handleInvoicePaymentSucceeded(invoice) {
-        console.log(`Invoice ${invoice.id} payment succeeded for customer ${invoice.customer}`);
+        const customerId = invoice.customer;
+        const subscriptionId = invoice.subscription;
+        const amountPaid = invoice.amount_paid / 100; // Convert from cents
+        const billingReason = invoice.billing_reason;
+
+        console.log(`💰 Invoice payment succeeded:
+            Customer: ${customerId}
+            Subscription: ${subscriptionId}
+            Amount: $${amountPaid}
+            Billing Reason: ${billingReason}
+            Invoice ID: ${invoice.id}`);
+
+        // Optional: Update payment records or send confirmation emails
+        // You can distinguish between first payment and renewals using invoice.billing_reason
+        // 'subscription_create' = first payment, 'subscription_cycle' = renewal
     }
 
     async handleInvoicePaymentFailed(invoice) {
-        console.log(`Invoice ${invoice.id} payment failed for customer ${invoice.customer}`);
+        const customerId = invoice.customer;
+        const subscriptionId = invoice.subscription;
+        const amountDue = invoice.amount_due / 100;
+        const attemptCount = invoice.attempt_count;
+
+        console.error(`❌ Invoice payment failed:
+            Customer: ${customerId}
+            Subscription: ${subscriptionId}
+            Amount Due: $${amountDue}
+            Attempt: ${attemptCount}
+            Invoice ID: ${invoice.id}`);
+
+        // Optional: Send payment failure notifications to customer
+        // Or update user's premium status if needed
+        // Consider handling different failure scenarios based on attempt_count
     }
 
     async createCheckoutSession({ userId, email, priceId, successUrl, cancelUrl }) {
