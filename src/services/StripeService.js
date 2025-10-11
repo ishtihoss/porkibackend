@@ -81,23 +81,22 @@ class StripeService {
             throw new Error(`Webhook signature verification failed: ${err.message}`);
         }
 
-        console.log(`Processing webhook event: ${event.type}`);
+        console.log(`Processing webhook event: ${event.type} (ID: ${event.id}, Created: ${new Date(event.created * 1000).toISOString()})`);
 
         switch (event.type) {
             case 'checkout.session.completed':
-                await this.handleCheckoutCompleted(event.data.object);
+                await this.handleCheckoutCompleted(event.data.object, event.created);
                 break;
 
             case 'customer.subscription.created':
             case 'customer.subscription.updated':
-                await this.handleSubscriptionUpdate(event.data.object);
+                await this.handleSubscriptionUpdate(event.data.object, event.created);
                 break;
 
             case 'customer.subscription.deleted':
-                await this.handleSubscriptionDeleted(event.data.object);
+                await this.handleSubscriptionDeleted(event.data.object, event.created);
                 break;
 
-            // Handle both payment success events (invoice.paid is newer, invoice.payment_succeeded is legacy)
             case 'invoice.paid':
             case 'invoice.payment_succeeded':
                 await this.handleInvoicePaymentSucceeded(event.data.object);
@@ -112,7 +111,7 @@ class StripeService {
         }
     }
 
-    async handleCheckoutCompleted(session) {
+    async handleCheckoutCompleted(session, eventTimestamp) {
         const userId = session.metadata?.userId;
         const customerId = session.customer;
 
@@ -139,18 +138,18 @@ class StripeService {
         console.log(`✅ Checkout completed - User ${userId} with customer ID ${customerId}`);
     }
 
-    async handleSubscriptionUpdate(subscription) {
+    async handleSubscriptionUpdate(subscription, eventTimestamp) {
         const customerId = subscription.customer;
         const subscriptionId = subscription.id;
         const status = subscription.status;
         
-        // Get the current period end from the subscription items
+        // Get the current period end
         let currentPeriodEnd;
-        if (subscription.items && subscription.items.data && subscription.items.data.length > 0) {
-            // Use the first subscription item's current_period_end
+        if (subscription.current_period_end) {
+            currentPeriodEnd = new Date(subscription.current_period_end * 1000);
+        } else if (subscription.items && subscription.items.data && subscription.items.data.length > 0) {
             currentPeriodEnd = new Date(subscription.items.data[0].current_period_end * 1000);
         } else {
-            // Fallback: calculate from billing_cycle_anchor + interval
             const billingAnchor = subscription.billing_cycle_anchor;
             const interval = subscription.plan?.interval || 'month';
             const intervalCount = subscription.plan?.interval_count || 1;
@@ -168,17 +167,55 @@ class StripeService {
         }
 
         console.log(`📊 Subscription update details:
+            Event Timestamp: ${new Date(eventTimestamp * 1000).toISOString()}
             Customer: ${customerId}
             Subscription: ${subscriptionId}
             Status: ${status}
             Current Period End: ${currentPeriodEnd.toISOString()}`);
 
         try {
+            // **FIX: Check existing data before updating to prevent race conditions**
+            const { data: existingData } = await this.supabase
+                .from('user_request_limits')
+                .select('last_webhook_timestamp, subscription_status')
+                .eq('stripe_customer_id', customerId)
+                .single();
+
+            // Skip update if we've already processed a newer event
+            if (existingData?.last_webhook_timestamp) {
+                const existingTimestamp = new Date(existingData.last_webhook_timestamp).getTime();
+                const newTimestamp = eventTimestamp * 1000;
+                
+                if (newTimestamp <= existingTimestamp) {
+                    console.log(`⏭️  Skipping outdated event (existing: ${existingData.last_webhook_timestamp}, new: ${new Date(newTimestamp).toISOString()})`);
+                    
+                    // Special case: If existing status is 'active', never downgrade to 'incomplete'
+                    if (existingData.subscription_status === 'active' && status === 'incomplete') {
+                        console.log(`🛡️  Protecting active status from incomplete downgrade`);
+                        return;
+                    }
+                }
+            }
+
+            // Only update if status is 'active', 'past_due', or 'canceled'
+            // Ignore 'incomplete' and 'incomplete_expired' unless it's the first event
+            const shouldUpdate = status === 'active' || 
+                                status === 'past_due' || 
+                                status === 'canceled' || 
+                                status === 'trialing' ||
+                                !existingData;
+
+            if (!shouldUpdate) {
+                console.log(`⏭️  Skipping ${status} status update (current: ${existingData?.subscription_status})`);
+                return;
+            }
+
             await this.supabase.rpc('update_premium_status_from_webhook', {
                 p_stripe_customer_id: customerId,
                 p_subscription_id: subscriptionId,
                 p_status: status,
-                p_end_date: currentPeriodEnd.toISOString()
+                p_end_date: currentPeriodEnd.toISOString(),
+                p_webhook_timestamp: new Date(eventTimestamp * 1000).toISOString()
             });
 
             console.log(`✅ Subscription ${subscriptionId} updated - Status: ${status}`);
@@ -188,7 +225,7 @@ class StripeService {
         }
     }
 
-    async handleSubscriptionDeleted(subscription) {
+    async handleSubscriptionDeleted(subscription, eventTimestamp) {
         const customerId = subscription.customer;
         const subscriptionId = subscription.id;
 
@@ -197,7 +234,8 @@ class StripeService {
                 p_stripe_customer_id: customerId,
                 p_subscription_id: subscriptionId,
                 p_status: 'canceled',
-                p_end_date: new Date().toISOString()
+                p_end_date: new Date().toISOString(),
+                p_webhook_timestamp: new Date(eventTimestamp * 1000).toISOString()
             });
 
             console.log(`🚫 Subscription ${subscriptionId} canceled for customer ${customerId}`);
@@ -210,7 +248,7 @@ class StripeService {
     async handleInvoicePaymentSucceeded(invoice) {
         const customerId = invoice.customer;
         const subscriptionId = invoice.subscription;
-        const amountPaid = invoice.amount_paid / 100; // Convert from cents
+        const amountPaid = invoice.amount_paid / 100;
         const billingReason = invoice.billing_reason;
 
         console.log(`💰 Invoice payment succeeded:
@@ -219,10 +257,6 @@ class StripeService {
             Amount: $${amountPaid}
             Billing Reason: ${billingReason}
             Invoice ID: ${invoice.id}`);
-
-        // Optional: Update payment records or send confirmation emails
-        // You can distinguish between first payment and renewals using invoice.billing_reason
-        // 'subscription_create' = first payment, 'subscription_cycle' = renewal
     }
 
     async handleInvoicePaymentFailed(invoice) {
@@ -237,10 +271,6 @@ class StripeService {
             Amount Due: $${amountDue}
             Attempt: ${attemptCount}
             Invoice ID: ${invoice.id}`);
-
-        // Optional: Send payment failure notifications to customer
-        // Or update user's premium status if needed
-        // Consider handling different failure scenarios based on attempt_count
     }
 
     async createCheckoutSession({ userId, email, priceId, successUrl, cancelUrl }) {
