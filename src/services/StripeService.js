@@ -143,7 +143,35 @@ class StripeService {
         const customerId = subscription.customer;
         const subscriptionId = subscription.id;
         const status = subscription.status;
-        const currentPeriodEnd = new Date(subscription.current_period_end * 1000);
+        
+        // Get the current period end from the subscription items
+        let currentPeriodEnd;
+        if (subscription.items && subscription.items.data && subscription.items.data.length > 0) {
+            // Use the first subscription item's current_period_end
+            currentPeriodEnd = new Date(subscription.items.data[0].current_period_end * 1000);
+        } else {
+            // Fallback: calculate from billing_cycle_anchor + interval
+            const billingAnchor = subscription.billing_cycle_anchor;
+            const interval = subscription.plan?.interval || 'month';
+            const intervalCount = subscription.plan?.interval_count || 1;
+            
+            currentPeriodEnd = new Date(billingAnchor * 1000);
+            if (interval === 'month') {
+                currentPeriodEnd.setMonth(currentPeriodEnd.getMonth() + intervalCount);
+            } else if (interval === 'year') {
+                currentPeriodEnd.setFullYear(currentPeriodEnd.getFullYear() + intervalCount);
+            } else if (interval === 'week') {
+                currentPeriodEnd.setDate(currentPeriodEnd.getDate() + (7 * intervalCount));
+            } else if (interval === 'day') {
+                currentPeriodEnd.setDate(currentPeriodEnd.getDate() + intervalCount);
+            }
+        }
+
+        console.log(`📊 Subscription update details:
+            Customer: ${customerId}
+            Subscription: ${subscriptionId}
+            Status: ${status}
+            Current Period End: ${currentPeriodEnd.toISOString()}`);
 
         try {
             await this.supabase.rpc('update_premium_status_from_webhook', {
