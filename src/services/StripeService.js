@@ -1,3 +1,4 @@
+
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
 
@@ -145,7 +146,7 @@ class StripeService {
         
         // Check for scheduled cancellation
         if (subscription.cancel_at_period_end === true && status === 'active') {
-            status = 'canceling'; // Indicate subscription is active but scheduled for cancellation
+            status = 'canceling';
         }
         
         // Get the current period end
@@ -180,44 +181,8 @@ class StripeService {
             Current Period End: ${currentPeriodEnd.toISOString()}`);
 
         try {
-            // Check existing data before updating to prevent race conditions
-            const { data: existingData } = await this.supabase
-                .from('user_request_limits')
-                .select('last_webhook_timestamp, subscription_status')
-                .eq('stripe_customer_id', customerId)
-                .single();
-
-            // Skip update if we've already processed a newer event
-            if (existingData?.last_webhook_timestamp) {
-                const existingTimestamp = new Date(existingData.last_webhook_timestamp).getTime();
-                const newTimestamp = eventTimestamp * 1000;
-                
-                if (newTimestamp <= existingTimestamp) {
-                    console.log(`⏭️  Skipping outdated event (existing: ${existingData.last_webhook_timestamp}, new: ${new Date(newTimestamp).toISOString()})`);
-                    
-                    // Special case: If existing status is 'active', never downgrade to 'incomplete'
-                    if (existingData.subscription_status === 'active' && status === 'incomplete') {
-                        console.log(`🛡️  Protecting active status from incomplete downgrade`);
-                        return;
-                    }
-                }
-            }
-
-            // Only update if status is 'active', 'canceling', 'past_due', or 'canceled'
-            // Ignore 'incomplete' and 'incomplete_expired' unless it's the first event
-            const shouldUpdate = status === 'active' || 
-                                status === 'canceling' || 
-                                status === 'past_due' || 
-                                status === 'canceled' || 
-                                status === 'trialing' ||
-                                !existingData;
-
-            if (!shouldUpdate) {
-                console.log(`⏭️  Skipping ${status} status update (current: ${existingData?.subscription_status})`);
-                return;
-            }
-
-            await this.supabase.rpc('update_premium_status_from_webhook', {
+            // Let the RPC handle ALL business logic (timestamp checks, status validation, etc.)
+            const { data, error } = await this.supabase.rpc('update_premium_status_from_webhook', {
                 p_stripe_customer_id: customerId,
                 p_subscription_id: subscriptionId,
                 p_status: status,
@@ -225,7 +190,28 @@ class StripeService {
                 p_webhook_timestamp: new Date(eventTimestamp * 1000).toISOString()
             });
 
-            console.log(`✅ Subscription ${subscriptionId} updated - Status: ${status}`);
+            if (error) {
+                console.error('❌ Error calling RPC:', error);
+                throw error;
+            }
+
+            // Log the result from RPC
+            if (data?.updated === false) {
+                console.log(`⏭️  Subscription update skipped: ${data.reason}`);
+                if (data.existing_timestamp) {
+                    console.log(`   Existing timestamp: ${data.existing_timestamp}`);
+                    console.log(`   New timestamp: ${data.new_timestamp}`);
+                }
+                if (data.existing_status) {
+                    console.log(`   Existing status: ${data.existing_status}`);
+                    console.log(`   Attempted status: ${data.attempted_status}`);
+                }
+            } else {
+                console.log(`✅ Subscription ${subscriptionId} updated successfully`);
+                console.log(`   Status: ${data.status}`);
+                console.log(`   Is Premium: ${data.is_premium}`);
+            }
+
         } catch (error) {
             console.error('Error updating subscription:', error);
             throw error;
@@ -237,7 +223,7 @@ class StripeService {
         const subscriptionId = subscription.id;
 
         try {
-            await this.supabase.rpc('update_premium_status_from_webhook', {
+            const { data, error } = await this.supabase.rpc('update_premium_status_from_webhook', {
                 p_stripe_customer_id: customerId,
                 p_subscription_id: subscriptionId,
                 p_status: 'canceled',
@@ -245,7 +231,16 @@ class StripeService {
                 p_webhook_timestamp: new Date(eventTimestamp * 1000).toISOString()
             });
 
-            console.log(`🚫 Subscription ${subscriptionId} canceled for customer ${customerId}`);
+            if (error) {
+                console.error('❌ Error calling RPC:', error);
+                throw error;
+            }
+
+            if (data?.updated === false) {
+                console.log(`⏭️  Subscription deletion skipped: ${data.reason}`);
+            } else {
+                console.log(`🚫 Subscription ${subscriptionId} canceled for customer ${customerId}`);
+            }
         } catch (error) {
             console.error('Error handling subscription deletion:', error);
             throw error;
