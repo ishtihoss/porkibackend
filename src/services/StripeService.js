@@ -141,7 +141,12 @@ class StripeService {
     async handleSubscriptionUpdate(subscription, eventTimestamp) {
         const customerId = subscription.customer;
         const subscriptionId = subscription.id;
-        const status = subscription.status;
+        let status = subscription.status;
+        
+        // Check for scheduled cancellation
+        if (subscription.cancel_at_period_end === true && status === 'active') {
+            status = 'canceling'; // Indicate subscription is active but scheduled for cancellation
+        }
         
         // Get the current period end
         let currentPeriodEnd;
@@ -171,10 +176,11 @@ class StripeService {
             Customer: ${customerId}
             Subscription: ${subscriptionId}
             Status: ${status}
+            Cancel at period end: ${subscription.cancel_at_period_end}
             Current Period End: ${currentPeriodEnd.toISOString()}`);
 
         try {
-            // **FIX: Check existing data before updating to prevent race conditions**
+            // Check existing data before updating to prevent race conditions
             const { data: existingData } = await this.supabase
                 .from('user_request_limits')
                 .select('last_webhook_timestamp, subscription_status')
@@ -197,9 +203,10 @@ class StripeService {
                 }
             }
 
-            // Only update if status is 'active', 'past_due', or 'canceled'
+            // Only update if status is 'active', 'canceling', 'past_due', or 'canceled'
             // Ignore 'incomplete' and 'incomplete_expired' unless it's the first event
             const shouldUpdate = status === 'active' || 
+                                status === 'canceling' || 
                                 status === 'past_due' || 
                                 status === 'canceled' || 
                                 status === 'trialing' ||
