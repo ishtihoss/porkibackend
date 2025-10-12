@@ -166,24 +166,46 @@ app.post('/api/create-checkout-session', async (req, res) => {
     }
 });
 
-// Customer Portal endpoint
+// Customer Portal endpoint - UPDATED to accept userId OR customerId
 app.post('/api/create-portal-session', async (req, res) => {
     try {
-        const { customerId } = req.body;
+        const { customerId, userId } = req.body;
         
-        if (!customerId) {
-            return res.status(400).json({ error: 'customerId is required' });
+        console.log('🔐 Portal session request:', { userId, customerId: customerId ? 'provided' : 'not provided' });
+        
+        // Need either customerId or userId
+        if (!customerId && !userId) {
+            return res.status(400).json({ error: 'customerId or userId is required' });
+        }
+
+        // If userId provided but no customerId, look it up
+        let finalCustomerId = customerId;
+        if (!finalCustomerId && userId) {
+            console.log('Looking up customer ID for userId:', userId);
+            const status = await stripeService.getSubscriptionStatus(userId);
+            finalCustomerId = status.stripeCustomerId;
+            
+            if (!finalCustomerId) {
+                return res.status(404).json({ 
+                    error: 'No subscription found. Please upgrade to Premium first.' 
+                });
+            }
+            console.log('Found customer ID:', finalCustomerId);
         }
 
         const session = await stripeService.createPortalSession({
-            customerId,
+            customerId: finalCustomerId,
             returnUrl: process.env.FRONTEND_URL
         });
 
+        console.log('✅ Portal session created:', session.id);
         res.json({ url: session.url });
     } catch (error) {
-        console.error('Error creating portal session:', error);
-        res.status(500).json({ error: error.message });
+        console.error('❌ Error creating portal session:', error);
+        res.status(500).json({ 
+            error: 'Failed to create billing portal session',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 });
 
