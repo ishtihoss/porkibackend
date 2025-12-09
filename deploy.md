@@ -20,3 +20,7 @@ docker run -d \
 
 
 sudo certbot certonly --standalone -d server.porkicoder.com --email payme@ishti.org --agree-tos --no-eff-email
+
+
+nano ~/.env
+cat ~/.env

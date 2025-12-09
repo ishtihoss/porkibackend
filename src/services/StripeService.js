@@ -2,7 +2,7 @@
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
 
-const FREE_USER_REQUEST_LIMIT = 5;
+const FREE_USER_REQUEST_LIMIT = 50;
 
 class StripeService {
     constructor() {
