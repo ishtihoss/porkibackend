@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const StripeService = require('./services/StripeService');
+const PublishService = require('./services/PublishService');
 
 dotenv.config();
 
@@ -28,6 +29,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const stripeService = new StripeService();
+const publishService = new PublishService();
 
 // CORS configuration - allow frontend domain
 const allowedOrigins = [
@@ -85,10 +87,34 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
     }
 });
 
+// ⚠️ CRITICAL: Deploy endpoint MUST be defined BEFORE global body parsers
+// because it needs a 100MB body limit (global default is 100KB)
+app.post('/api/publish/deploy', cors(corsOptions), express.json({ limit: '100mb' }), async (req, res) => {
+    try {
+        const { userId, subdomain, files } = req.body;
+        if (!userId || !subdomain || !files) {
+            return res.status(400).json({ error: 'userId, subdomain, and files are required' });
+        }
+
+        console.log(`📦 Publish deploy: user=${userId} subdomain=${subdomain} files=${files.length}`);
+        const result = await publishService.deploy(userId, subdomain, files);
+
+        if (result.error) {
+            const status = result.error === 'PREMIUM_REQUIRED' ? 403 : 400;
+            return res.status(status).json(result);
+        }
+
+        res.json(result);
+    } catch (error) {
+        console.error('Error deploying site:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Apply CORS to all other routes
 app.use(cors(corsOptions));
 
-// Regular middleware (after webhook route)
+// Regular middleware (after webhook route and deploy route)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -219,6 +245,50 @@ app.get('/api/subscription-status/:userId', async (req, res) => {
         res.json(status);
     } catch (error) {
         console.error('Error getting subscription status:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ── Publish endpoints ────────────────────────────────────────────────
+
+app.post('/api/publish/check-subdomain', async (req, res) => {
+    try {
+        const { userId, subdomain } = req.body;
+        if (!userId || !subdomain) {
+            return res.status(400).json({ error: 'userId and subdomain are required' });
+        }
+        const result = await publishService.checkSubdomain(userId, subdomain);
+        res.json(result);
+    } catch (error) {
+        console.error('Error checking subdomain:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/publish/sites/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const sites = await publishService.listSites(userId);
+        res.json({ sites });
+    } catch (error) {
+        console.error('Error listing sites:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.delete('/api/publish/sites/:userId/:subdomain', async (req, res) => {
+    try {
+        const { userId, subdomain } = req.params;
+        const result = await publishService.deleteSite(userId, subdomain);
+
+        if (result.error) {
+            const status = result.error === 'FORBIDDEN' ? 403 : 404;
+            return res.status(status).json(result);
+        }
+
+        res.json(result);
+    } catch (error) {
+        console.error('Error deleting site:', error);
         res.status(500).json({ error: error.message });
     }
 });
