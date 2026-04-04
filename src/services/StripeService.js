@@ -386,8 +386,8 @@ class StripeService {
                 quantity: 1,
             }],
             mode: 'payment',
-            success_url: `${process.env.FRONTEND_URL}/domain-success?domain=${encodeURIComponent(domain)}`,
-            cancel_url: `${process.env.FRONTEND_URL}/domain-cancel`,
+            success_url: `${process.env.BACKEND_URL || 'https://server.porkicoder.com'}/domain-success?domain=${encodeURIComponent(domain)}`,
+            cancel_url: `${process.env.BACKEND_URL || 'https://server.porkicoder.com'}/domain-cancel`,
             metadata: {
                 userId,
                 domain,

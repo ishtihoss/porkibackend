@@ -135,6 +135,68 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ── Domain purchase redirect pages (Stripe sends users here after checkout) ──
+
+app.get('/domain-success', (req, res) => {
+    const domain = req.query.domain || '';
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Payment Received - PorkiCoder</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1e1e1e; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .card { background: #2d2d30; border: 1px solid #3e3e42; border-radius: 12px; padding: 48px; text-align: center; max-width: 440px; }
+    .icon { color: #3fb950; font-size: 48px; margin-bottom: 16px; }
+    h1 { font-size: 22px; margin-bottom: 12px; color: #e0e0e0; }
+    .domain { color: #58a6ff; font-size: 18px; font-weight: 600; margin-bottom: 16px; }
+    p { color: #9d9d9d; font-size: 14px; line-height: 1.6; margin-bottom: 8px; }
+    .hint { margin-top: 20px; padding: 12px 16px; background: #1e1e1e; border-radius: 6px; font-size: 13px; color: #9d9d9d; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">&#10003;</div>
+    <h1>Payment Received!</h1>
+    ${domain ? '<div class="domain">' + domain.replace(/[<>"'&]/g, '') + '</div>' : ''}
+    <p>Your domain is now being set up automatically.</p>
+    <p>This includes DNS configuration, SSL certificate, and CDN deployment.</p>
+    <div class="hint">You can close this tab and return to PorkiCoder.<br>The app is tracking the setup progress.</div>
+  </div>
+</body>
+</html>`);
+});
+
+app.get('/domain-cancel', (req, res) => {
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Purchase Cancelled - PorkiCoder</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1e1e1e; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .card { background: #2d2d30; border: 1px solid #3e3e42; border-radius: 12px; padding: 48px; text-align: center; max-width: 440px; }
+    .icon { color: #9d9d9d; font-size: 48px; margin-bottom: 16px; }
+    h1 { font-size: 22px; margin-bottom: 12px; color: #e0e0e0; }
+    p { color: #9d9d9d; font-size: 14px; line-height: 1.6; }
+    .hint { margin-top: 20px; padding: 12px 16px; background: #1e1e1e; border-radius: 6px; font-size: 13px; color: #9d9d9d; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">&#10007;</div>
+    <h1>Purchase Cancelled</h1>
+    <p>No charges were made.</p>
+    <div class="hint">You can close this tab and return to PorkiCoder to try again.</div>
+  </div>
+</body>
+</html>`);
+});
+
 // API Routes
 app.get('/api/health', (req, res) => {
     res.json({ 
