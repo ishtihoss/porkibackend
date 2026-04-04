@@ -1,8 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const { createClient } = require('@supabase/supabase-js');
 const StripeService = require('./services/StripeService');
 const PublishService = require('./services/PublishService');
+const DomainSearchService = require('./services/DomainSearchService');
+const DomainOrchestrator = require('./services/DomainOrchestrator');
 
 dotenv.config();
 
@@ -30,6 +33,20 @@ const PORT = process.env.PORT || 3000;
 
 const stripeService = new StripeService();
 const publishService = new PublishService();
+
+// Shared Supabase client for domain endpoints
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+// Domain services (only initialize if Porkbun keys are configured)
+let domainSearchService = null;
+let domainOrchestrator = null;
+if (process.env.PORKBUN_API_KEY && process.env.PORKBUN_SECRET_KEY) {
+    domainSearchService = new DomainSearchService();
+    domainOrchestrator = new DomainOrchestrator();
+    console.log('🌐 Domain purchase services initialized');
+} else {
+    console.log('⚠️ Domain purchase disabled (PORKBUN_API_KEY not set)');
+}
 
 // CORS configuration - allow frontend domain
 const allowedOrigins = [
@@ -289,6 +306,292 @@ app.delete('/api/publish/sites/:userId/:subdomain', async (req, res) => {
         res.json(result);
     } catch (error) {
         console.error('Error deleting site:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ── Domain purchase endpoints ────────────────────────────────────────
+
+/**
+ * Middleware: reject domain requests if services not configured.
+ */
+function requireDomainServices(req, res, next) {
+    if (!domainSearchService || !domainOrchestrator) {
+        return res.status(503).json({ error: 'Domain purchase service not configured' });
+    }
+    next();
+}
+
+// Search domain availability + pricing
+app.post('/api/domains/search', requireDomainServices, async (req, res) => {
+    try {
+        const { query } = req.body;
+        if (!query || typeof query !== 'string') {
+            return res.status(400).json({ error: 'query is required' });
+        }
+
+        console.log(`🔍 Domain search: ${query}`);
+        const results = await domainSearchService.search(query);
+
+        // Add markup pricing
+        for (const result of results.results) {
+            if (result.price) {
+                result.userPriceCents = domainSearchService.getMarkupPrice(result.price);
+                result.renewalPriceCents = domainSearchService.getMarkupPrice(result.renewalPrice || result.price);
+            }
+        }
+
+        res.json(results);
+    } catch (error) {
+        console.error('Error searching domains:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Initiate domain purchase: creates Stripe checkout session
+app.post('/api/domains/purchase', requireDomainServices, async (req, res) => {
+    try {
+        const { userId, email, domain, subdomain, priceCents } = req.body;
+        if (!userId || !email || !domain || !subdomain || !priceCents) {
+            return res.status(400).json({
+                error: 'userId, email, domain, subdomain, and priceCents are required'
+            });
+        }
+
+        console.log(`💳 Domain purchase initiated: ${domain} for user ${userId}`);
+
+        // Check domain isn't already registered in our system
+
+        const { data: existing } = await supabase
+            .from('custom_domains')
+            .select('id, user_id, status')
+            .eq('domain', domain)
+            .maybeSingle();
+
+        if (existing) {
+            if (existing.user_id === userId && existing.status === 'active') {
+                return res.status(400).json({ error: 'You already own this domain' });
+            }
+            if (existing.user_id !== userId) {
+                return res.status(400).json({ error: 'This domain is already registered by another user' });
+            }
+        }
+
+        // Verify the subdomain belongs to this user
+        const { data: site } = await supabase
+            .from('published_sites')
+            .select('user_id')
+            .eq('subdomain', subdomain)
+            .maybeSingle();
+
+        if (!site || site.user_id !== userId) {
+            return res.status(400).json({ error: 'You do not own this published site' });
+        }
+
+        // Create Stripe checkout session for domain purchase
+        const session = await stripeService.createDomainCheckoutSession({
+            userId,
+            email,
+            domain,
+            subdomain,
+            priceCents,
+        });
+
+        // Create pending domain record
+        if (!existing) {
+            await supabase.from('custom_domains').insert({
+                user_id: userId,
+                subdomain,
+                domain,
+                status: 'payment_pending',
+                stripe_checkout_session_id: session.id,
+                purchase_price_cents: priceCents,
+                renewal_price_cents: priceCents,
+            });
+        } else {
+            await supabase.from('custom_domains')
+                .update({
+                    status: 'payment_pending',
+                    stripe_checkout_session_id: session.id,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', existing.id);
+        }
+
+        res.json({ sessionId: session.id, url: session.url });
+    } catch (error) {
+        console.error('Error initiating domain purchase:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// SSE endpoint: real-time provisioning progress
+app.get('/api/domains/status/:domainId', requireDomainServices, async (req, res) => {
+    const { domainId } = req.params;
+
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+    });
+
+    // Send current status immediately
+    const { createClient } = require('@supabase/supabase-js');
+    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+    const { data: domain } = await supabase
+        .from('custom_domains')
+        .select('status, domain')
+        .eq('id', domainId)
+        .single();
+
+    if (domain) {
+        res.write(`data: ${JSON.stringify({ step: domain.status, domain: domain.domain })}\n\n`);
+    }
+
+    // Register for future updates
+    domainOrchestrator.addSseClient(domainId, res);
+
+    // Keep-alive ping every 30s
+    const keepAlive = setInterval(() => {
+        try { res.write(': keepalive\n\n'); } catch (e) { clearInterval(keepAlive); }
+    }, 30000);
+
+    req.on('close', () => clearInterval(keepAlive));
+});
+
+// List user's custom domains
+app.get('/api/domains/list/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+
+
+        const { data, error } = await supabase
+            .from('custom_domains')
+            .select('id, domain, subdomain, status, purchase_price_cents, renewal_price_cents, domain_registered_at, domain_expires_at, created_at')
+            .eq('user_id', userId)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        res.json({ domains: data || [] });
+    } catch (error) {
+        console.error('Error listing domains:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete domain + tear down infrastructure
+app.delete('/api/domains/:userId/:domain', requireDomainServices, async (req, res) => {
+    try {
+        const { userId, domain: domainName } = req.params;
+
+
+        const { data: domain } = await supabase
+            .from('custom_domains')
+            .select('*')
+            .eq('domain', domainName)
+            .eq('user_id', userId)
+            .single();
+
+        if (!domain) {
+            return res.status(404).json({ error: 'Domain not found' });
+        }
+
+        // Tear down AWS infrastructure
+        await domainOrchestrator.teardown(domain.id);
+
+        // Delete the record
+        await supabase
+            .from('custom_domains')
+            .delete()
+            .eq('id', domain.id);
+
+        console.log(`🗑️ Domain deleted: ${domainName}`);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting domain:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Initiate domain transfer out
+app.post('/api/domains/transfer/:domain', requireDomainServices, async (req, res) => {
+    try {
+        const { domain: domainName } = req.params;
+        const { userId } = req.body;
+
+
+        const { data: domain } = await supabase
+            .from('custom_domains')
+            .select('*')
+            .eq('domain', domainName)
+            .eq('user_id', userId)
+            .single();
+
+        if (!domain) {
+            return res.status(404).json({ error: 'Domain not found' });
+        }
+
+        if (domain.status !== 'active') {
+            return res.status(400).json({ error: 'Domain must be active to transfer' });
+        }
+
+        const DomainPurchaseService = require('./services/DomainPurchaseService');
+        const purchaseService = new DomainPurchaseService();
+        const result = await purchaseService.initiateTransfer(domainName);
+
+        await supabase
+            .from('custom_domains')
+            .update({ status: 'transfer_out', updated_at: new Date().toISOString() })
+            .eq('id', domain.id);
+
+        res.json({ success: true, authCode: result.authCode });
+    } catch (error) {
+        console.error('Error initiating transfer:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Change which published site a domain points to
+app.post('/api/domains/change-site/:domain', requireDomainServices, async (req, res) => {
+    try {
+        const { domain: domainName } = req.params;
+        const { userId, newSubdomain } = req.body;
+
+        if (!userId || !newSubdomain) {
+            return res.status(400).json({ error: 'userId and newSubdomain are required' });
+        }
+
+
+        // Verify domain ownership
+        const { data: domain } = await supabase
+            .from('custom_domains')
+            .select('*')
+            .eq('domain', domainName)
+            .eq('user_id', userId)
+            .single();
+
+        if (!domain) {
+            return res.status(404).json({ error: 'Domain not found' });
+        }
+
+        // Verify new subdomain ownership
+        const { data: site } = await supabase
+            .from('published_sites')
+            .select('user_id')
+            .eq('subdomain', newSubdomain)
+            .maybeSingle();
+
+        if (!site || site.user_id !== userId) {
+            return res.status(400).json({ error: 'You do not own this published site' });
+        }
+
+        await domainOrchestrator.changeSite(domain.id, newSubdomain);
+
+        res.json({ success: true, domain: domainName, subdomain: newSubdomain });
+    } catch (error) {
+        console.error('Error changing site:', error);
         res.status(500).json({ error: error.message });
     }
 });

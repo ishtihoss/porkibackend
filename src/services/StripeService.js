@@ -121,6 +121,12 @@ class StripeService {
             return;
         }
 
+        // Check if this is a domain purchase
+        if (session.metadata?.type === 'domain_purchase') {
+            await this._handleDomainPurchaseCompleted(session);
+            return;
+        }
+
         await this.ensureUserRecord(userId);
 
         const { error } = await this.supabase
@@ -137,6 +143,31 @@ class StripeService {
         }
 
         console.log(`✅ Checkout completed - User ${userId} with customer ID ${customerId}`);
+    }
+
+    async _handleDomainPurchaseCompleted(session) {
+        const { userId, domain } = session.metadata;
+        console.log(`💳 Domain purchase payment confirmed: ${domain} for user ${userId}`);
+
+        // Find the pending domain record
+        const { data: domainRecord, error } = await this.supabase
+            .from('custom_domains')
+            .select('id')
+            .eq('domain', domain)
+            .eq('user_id', userId)
+            .single();
+
+        if (error || !domainRecord) {
+            console.error(`❌ Could not find domain record for ${domain}:`, error);
+            return;
+        }
+
+        // Start provisioning asynchronously (don't block the webhook response)
+        const DomainOrchestrator = require('./DomainOrchestrator');
+        const orchestrator = new DomainOrchestrator();
+        orchestrator.startProvisioning(domainRecord.id).catch(err => {
+            console.error(`❌ Domain provisioning failed for ${domain}:`, err.message);
+        });
     }
 
     async handleSubscriptionUpdate(subscription, eventTimestamp) {
@@ -310,6 +341,59 @@ class StripeService {
             success_url: successUrl,
             cancel_url: cancelUrl,
             metadata: { userId }
+        });
+
+        return session;
+    }
+
+    async createDomainCheckoutSession({ userId, email, domain, subdomain, priceCents }) {
+        await this.ensureUserRecord(userId);
+
+        const { data: userData } = await this.supabase
+            .from('user_request_limits')
+            .select('stripe_customer_id')
+            .eq('user_id', userId)
+            .single();
+
+        let customerId = userData?.stripe_customer_id;
+
+        if (!customerId) {
+            const customer = await this.stripe.customers.create({
+                email,
+                metadata: { userId }
+            });
+            customerId = customer.id;
+
+            await this.supabase
+                .from('user_request_limits')
+                .update({ stripe_customer_id: customerId })
+                .eq('user_id', userId);
+        }
+
+        const session = await this.stripe.checkout.sessions.create({
+            customer: customerId,
+            payment_method_types: ['card'],
+            line_items: [{
+                price_data: {
+                    currency: 'usd',
+                    unit_amount: priceCents,
+                    product_data: {
+                        name: `Domain: ${domain}`,
+                        description: `Custom domain registration for ${subdomain}.porkicoder.com`,
+                        metadata: { type: 'domain', domain, subdomain },
+                    },
+                },
+                quantity: 1,
+            }],
+            mode: 'payment',
+            success_url: `${process.env.FRONTEND_URL}/domain-success?domain=${encodeURIComponent(domain)}`,
+            cancel_url: `${process.env.FRONTEND_URL}/domain-cancel`,
+            metadata: {
+                userId,
+                domain,
+                subdomain,
+                type: 'domain_purchase',
+            },
         });
 
         return session;
