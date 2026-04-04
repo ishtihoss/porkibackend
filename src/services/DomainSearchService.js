@@ -2,24 +2,26 @@ const https = require('https');
 
 const PORKBUN_API_BASE = 'https://api.porkbun.com/api/json/v3';
 
-// Popular TLDs to check when user searches
-const SUGGESTED_TLDS = ['.com', '.io', '.dev', '.org', '.net', '.co', '.app', '.xyz'];
+// Popular TLDs to check when user searches (ordered by popularity)
+const SUGGESTED_TLDS = ['.com', '.org', '.net', '.io', '.dev', '.co', '.app', '.xyz'];
 
-// Cache pricing for 5 minutes to reduce API calls
-const PRICE_CACHE_TTL = 5 * 60 * 1000;
+// Cache results for 5 minutes
+const CACHE_TTL = 5 * 60 * 1000;
 
 class DomainSearchService {
   constructor() {
     this.apiKey = process.env.PORKBUN_API_KEY;
     this.secretKey = process.env.PORKBUN_SECRET_KEY;
-    this._priceCache = new Map();
+    this._cache = new Map();
   }
 
   /**
    * Search for domain availability and pricing.
    * If query includes a TLD (e.g. "mysite.com"), check that specific domain.
    * If no TLD, check across popular TLDs.
-   * Returns: { results: [{ domain, available, price, currency, tld }] }
+   *
+   * Porkbun rate-limits checkDomain to 1 request per 10 seconds,
+   * so we run checks sequentially with a delay between each.
    */
   async search(query) {
     const cleaned = query.trim().toLowerCase().replace(/[^a-z0-9.-]/g, '');
@@ -32,68 +34,51 @@ class DomainSearchService {
       ? [cleaned]
       : SUGGESTED_TLDS.map(tld => cleaned + tld);
 
-    const results = await Promise.allSettled(
-      domainsToCheck.map(domain => this._checkAvailability(domain))
-    );
+    const results = [];
 
-    const output = results
-      .map((result, i) => {
-        if (result.status === 'fulfilled') return result.value;
-        console.error(`Failed to check ${domainsToCheck[i]}:`, result.reason?.message);
-        return null;
-      })
-      .filter(Boolean);
+    for (const domain of domainsToCheck) {
+      try {
+        const result = await this._checkAvailability(domain);
+        results.push(result);
+      } catch (err) {
+        console.error(`Failed to check ${domain}:`, err.message);
+      }
+    }
 
     // Sort: available first, then by price ascending
-    output.sort((a, b) => {
+    results.sort((a, b) => {
       if (a.available !== b.available) return a.available ? -1 : 1;
       return (a.price || Infinity) - (b.price || Infinity);
     });
 
-    return { results: output };
+    return { results };
   }
 
   /**
    * Check availability and pricing for a single domain.
+   * Porkbun's checkDomain endpoint returns availability AND pricing in one call.
    */
   async _checkAvailability(domain) {
-    // Check price cache first
-    const cached = this._priceCache.get(domain);
-    if (cached && Date.now() - cached.timestamp < PRICE_CACHE_TTL) {
+    // Check cache first
+    const cached = this._cache.get(domain);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
       return cached.data;
     }
 
-    const body = {
+    const tld = domain.substring(domain.indexOf('.') + 1);
+
+    const response = await this._apiRequest(`/domain/checkDomain/${domain}`, {
       apikey: this.apiKey,
       secretapikey: this.secretKey,
-    };
+    });
 
-    // Porkbun domain pricing endpoint
-    const tld = domain.substring(domain.indexOf('.') + 1);
-    let price = null;
-    let renewalPrice = null;
-
-    try {
-      const pricingData = await this._apiRequest('/pricing/get', body);
-      if (pricingData.status === 'SUCCESS' && pricingData.pricing?.[tld]) {
-        price = parseFloat(pricingData.pricing[tld].registration);
-        renewalPrice = parseFloat(pricingData.pricing[tld].renewal);
-      }
-    } catch (err) {
-      console.error(`Pricing fetch failed for ${tld}:`, err.message);
-    }
-
-    // Check availability via Porkbun's check endpoint
-    let available = false;
-    try {
-      const checkData = await this._apiRequest(`/domain/checkDomain/${domain}`, body);
-      // Porkbun returns status: "SUCCESS" with avail: true/false
-      // or sometimes the response indicates availability differently
-      available = checkData.status === 'SUCCESS' &&
-        (checkData.avail === true || checkData.avail === 'true' || checkData.your_response === 'Domain is available');
-    } catch (err) {
-      console.error(`Availability check failed for ${domain}:`, err.message);
-    }
+    // Response format:
+    // { status: "SUCCESS", response: { avail: "yes"|"no", price: "11.08", additional: { renewal: { price: "11.08" } } } }
+    const available = response.status === 'SUCCESS' && response.response?.avail === 'yes';
+    const price = response.response?.price ? parseFloat(response.response.price) : null;
+    const renewalPrice = response.response?.additional?.renewal?.price
+      ? parseFloat(response.response.additional.renewal.price)
+      : price;
 
     const result = {
       domain,
@@ -104,18 +89,16 @@ class DomainSearchService {
       currency: 'USD',
     };
 
-    // Cache the result
-    this._priceCache.set(domain, { data: result, timestamp: Date.now() });
-
+    this._cache.set(domain, { data: result, timestamp: Date.now() });
     return result;
   }
 
   /**
-   * Get markup price (our price to the user).
+   * Get markup price in cents (our price to the user).
    */
   getMarkupPrice(wholesalePrice) {
     const markupPercent = parseInt(process.env.DOMAIN_MARKUP_PERCENT || '20', 10);
-    return Math.ceil(wholesalePrice * (1 + markupPercent / 100) * 100); // cents
+    return Math.ceil(wholesalePrice * (1 + markupPercent / 100) * 100);
   }
 
   /**
@@ -144,13 +127,13 @@ class DomainSearchService {
           try {
             resolve(JSON.parse(responseData));
           } catch (e) {
-            reject(new Error(`Invalid JSON response from Porkbun: ${responseData.substring(0, 200)}`));
+            reject(new Error(`Invalid JSON from Porkbun: ${responseData.substring(0, 200)}`));
           }
         });
       });
 
       req.on('error', reject);
-      req.setTimeout(15000, () => {
+      req.setTimeout(20000, () => {
         req.destroy(new Error('Porkbun API request timed out'));
       });
       req.write(data);
