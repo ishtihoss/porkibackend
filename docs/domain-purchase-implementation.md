@@ -81,46 +81,31 @@ CloudFront points directly to Supabase Storage — no EC2/nginx in the path for 
 
 ---
 
-## What's Missing (pick up next session)
+## Completed Setup
 
-### Credentials Needed
+### Credentials (all configured in porkibackend `.env`)
+- [x] Porkbun API key + secret key — tested, domain search returns availability + pricing
+- [x] AWS IAM credentials — tested, Route 53 zone create/delete works
+- [x] AWS region set to `us-east-1` (required for ACM + CloudFront)
+- [x] Domain markup: 20% (default)
+- [x] Porkbun account funded with $20
 
-1. **Porkbun Reseller API Key** — Apply for reseller account at porkbun.com, get API key + secret key
-   - Add to porkibackend `.env`:
-     ```
-     PORKBUN_API_KEY=pk1_...
-     PORKBUN_SECRET_KEY=sk1_...
-     ```
+### Stripe Checkout Redirect
+- [x] Success page served at `server.porkicoder.com/domain-success` — dark theme, tells user to return to app
+- [x] Cancel page served at `server.porkicoder.com/domain-cancel` — tells user no charges made
+- [x] Checkout URLs in `StripeService.createDomainCheckoutSession()` updated to point to backend
 
-2. **AWS IAM Credentials** — Create an IAM user with programmatic access
-   - Required policies: `AmazonRoute53FullAccess`, `AWSCertificateManagerFullAccess`, `CloudFrontFullAccess`
-   - Add to porkibackend `.env`:
-     ```
-     AWS_ACCESS_KEY_ID=AKIA...
-     AWS_SECRET_ACCESS_KEY=...
-     AWS_REGION=us-east-1
-     ```
+---
 
-3. **Domain markup percentage** (optional, defaults to 20%):
-   ```
-   DOMAIN_MARKUP_PERCENT=20
-   ```
+## What's Next
 
-### Remaining Work
-
-#### 1. Deploy to EC2 and End-to-End Test
+### 1. Deploy to EC2 and End-to-End Test
 - [ ] Copy updated `.env` to EC2 (with PORKBUN_API_KEY, PORKBUN_SECRET_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION)
-- [ ] `git pull` on EC2, rebuild Docker image, restart container
+- [ ] Rebuild Docker image, push, restart container on EC2
 - [ ] Buy a cheap test domain (~$2 `.xyz`) through the full pipeline
 - [ ] Verify: Stripe charge → Porkbun registration → Route 53 zone → ACM cert → CloudFront distribution → site loads on custom domain with HTTPS
 
-#### 2. Stripe Checkout Redirect Handling
-- [ ] The `success_url` and `cancel_url` in `StripeService.createDomainCheckoutSession()` currently point to `https://porkicoder.com/domain-success` and `domain-cancel` — these pages don't exist
-- [ ] **Option A**: Create simple success/cancel pages on the landing site that tell the user to go back to the app
-- [ ] **Option B**: Use a custom protocol handler (`porkicoder://domain-success?domain=...`) so the Electron app catches the redirect directly
-- [ ] Either way, the DomainPurchaseModal already polls for status, so the user just needs to know to go back to the app
-
-#### 3. Settings UI — Domain Management
+### 2. Settings UI — Domain Management (not blocking deploy)
 - [ ] In `SettingsModal.js` → Published Sites section, show custom domains alongside published sites
 - [ ] Each domain row shows: domain name, status badge (active/provisioning/expired), linked subdomain, expiry date
 - [ ] Action buttons per domain:
