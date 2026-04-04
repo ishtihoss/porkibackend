@@ -106,20 +106,58 @@ CloudFront points directly to Supabase Storage — no EC2/nginx in the path for 
    DOMAIN_MARKUP_PERCENT=20
    ```
 
-### Features Still To Build
+### Remaining Work
 
-- [ ] **Domain renewal cron job** — Daily check for domains expiring within 30 days, charge Stripe subscription, renew at Porkbun
-- [ ] **Settings UI integration** — Show custom domains in Settings → Published Sites with manage/renew/transfer/delete actions
-- [ ] **Stripe success/cancel URL handling** — The Electron app needs to handle the redirect after Stripe checkout (currently points to frontend URLs that don't exist in the Electron app)
-- [ ] **End-to-end testing** — Buy a cheap test domain ($2-3 TLD) to verify the full pipeline
-- [ ] **Error recovery** — Handle edge cases: Porkbun API down, AWS rate limits, partial provisioning failures
-- [ ] **Domain renewal Stripe subscriptions** — After initial purchase, create annual subscription per domain
+#### 1. Deploy to EC2 and End-to-End Test
+- [ ] Copy updated `.env` to EC2 (with PORKBUN_API_KEY, PORKBUN_SECRET_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION)
+- [ ] `git pull` on EC2, rebuild Docker image, restart container
+- [ ] Buy a cheap test domain (~$2 `.xyz`) through the full pipeline
+- [ ] Verify: Stripe charge → Porkbun registration → Route 53 zone → ACM cert → CloudFront distribution → site loads on custom domain with HTTPS
 
-### Deployment
+#### 2. Stripe Checkout Redirect Handling
+- [ ] The `success_url` and `cancel_url` in `StripeService.createDomainCheckoutSession()` currently point to `https://porkicoder.com/domain-success` and `domain-cancel` — these pages don't exist
+- [ ] **Option A**: Create simple success/cancel pages on the landing site that tell the user to go back to the app
+- [ ] **Option B**: Use a custom protocol handler (`porkicoder://domain-success?domain=...`) so the Electron app catches the redirect directly
+- [ ] Either way, the DomainPurchaseModal already polls for status, so the user just needs to know to go back to the app
 
-- [ ] Add new env vars to production `.env` on EC2
-- [ ] Rebuild and push Docker image for porkibackend
-- [ ] Test with a real domain purchase
+#### 3. Settings UI — Domain Management
+- [ ] In `SettingsModal.js` → Published Sites section, show custom domains alongside published sites
+- [ ] Each domain row shows: domain name, status badge (active/provisioning/expired), linked subdomain, expiry date
+- [ ] Action buttons per domain:
+  - **Change Site** — dropdown of user's published sites, calls `domain:change-site`
+  - **Transfer Out** — shows auth/EPP code, calls `domain:transfer`
+  - **Delete** — confirmation dialog, calls `domain:delete`
+- [ ] "Add Domain" button next to any published site that doesn't have one (opens DomainPurchaseModal)
+
+#### 4. Domain Renewal System
+- [ ] **Backend cron job** (`src/services/DomainRenewalService.js`):
+  - Runs daily (use `setInterval` or a proper cron lib like `node-cron`)
+  - Queries `custom_domains` where `domain_expires_at` is within 30 days and status is `active`
+  - For each: create a Stripe invoice/charge, on success call `DomainPurchaseService.renewDomain()`, update `domain_expires_at`
+  - On payment failure: set status to `renewal_due`, retry 3 times over 7 days
+- [ ] **Stripe subscription per domain**: After initial purchase, create an annual Stripe subscription so renewals are automatic
+  - Webhook `invoice.paid` with domain metadata triggers Porkbun renewal
+  - Webhook `invoice.payment_failed` sets status to `renewal_due`
+- [ ] **In-app notification**: When a domain is in `renewal_due` status, show a warning in Settings
+
+#### 5. Error Recovery and Edge Cases
+- [ ] **Partial provisioning retry**: If orchestrator fails midway (e.g., ACM cert timeout), the user should be able to click "Retry" in Settings to resume from the failed step. The orchestrator is already idempotent — just need a UI trigger.
+- [ ] **Orphan cleanup**: If Stripe payment succeeds but provisioning fails completely, we have a `payment_pending` or stuck record. Add a daily check that retries stuck domains or alerts.
+- [ ] **DNS propagation delay**: After setting nameservers at Porkbun, it can take up to 48 hours for NS records to propagate. ACM cert validation will fail during this window. The orchestrator should retry `issuing_cert` step with longer polling (currently 5 min max, may need 30+ min).
+- [ ] **CloudFront deployment time**: CloudFront distributions take 5-15 minutes to deploy. The SSE/polling UI handles this, but should show a clear "this is normal" message.
+- [ ] **Domain already registered elsewhere**: If a user searches for a domain they already own at another registrar, we should eventually support "bring your own domain" (Phase 1 of the existing `docs/custom-domains-plan.md`) — manual DNS pointing, not purchase.
+
+#### 6. Porkbun API Rate Limiting
+- [ ] Porkbun limits `checkDomain` to 1 request per 10 seconds. Currently we run checks sequentially which is slow for multi-TLD search (8 TLDs = ~80 seconds worst case).
+- [ ] **Fix**: When searching without a TLD, check the most popular 3-4 TLDs first (.com, .org, .net, .io) and return partial results immediately. Load remaining TLDs in the background.
+- [ ] Consider caching Porkbun's bulk pricing list (`/pricing/get`) on startup and only using `checkDomain` for availability (not pricing).
+
+#### 7. "Bring Your Own Domain" Support (Phase 1 from existing plan)
+- [ ] For users who already own a domain elsewhere and don't want to buy through us
+- [ ] UI: "I already have a domain" option in DomainPurchaseModal
+- [ ] Show DNS instructions (add A record pointing to our IP or CNAME to CloudFront)
+- [ ] Backend verifies DNS, issues cert, creates CloudFront distribution
+- [ ] This is Phase 1 from `docs/custom-domains-plan.md` — the infrastructure is mostly built, just needs the verification flow and a simpler UI path
 
 ---
 
